@@ -27,7 +27,6 @@ from vllm.platforms import Platform, PlatformEnum
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
 from vllm_ascend.ascend_config import init_ascend_config
-from vllm_ascend.utils import refresh_block_size
 
 # isort: off
 from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD,

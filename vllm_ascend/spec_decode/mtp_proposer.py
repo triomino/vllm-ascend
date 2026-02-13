@@ -352,6 +352,7 @@ class MtpProposer(EagleProposer):
                     hidden_states = self.model(input_ids=input_ids,
                                                positions=positions,
                                                hidden_states=hidden_states)
+                    hidden_states = hidden_states[0] if isinstance(hidden_states,list) else hidden_states
                     forward_context = get_forward_context()
                     if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not self.use_sparse:
                         self._update_full_graph_params(forward_context,

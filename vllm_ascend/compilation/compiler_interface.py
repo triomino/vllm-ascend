@@ -28,7 +28,7 @@ from torch.fx import GraphModule
 from vllm.compilation.compiler_interface import CompilerInterface
 from vllm.config.utils import Range
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import AscendCompilationConfig, get_ascend_config
 from vllm_ascend.utils import COMPILATION_PASS_KEY
 
 
@@ -73,6 +73,8 @@ def npugraph_ex_compile(
     graph: fx.GraphModule,
     example_inputs: list[Any],
     compiler_config: dict[str, Any],
+    vllm_config: VllmConfig,
+    ascend_compilation_config: AscendCompilationConfig,
     compile_range: Range,
     key: Optional[str] = None,
 ) -> tuple[Optional[Callable], Optional[Any]]:
@@ -105,8 +107,21 @@ def npugraph_ex_compile(
     config.mode = "reduce-overhead"
     # execute FX graph in eager mode before graph mode to optimize FX graph.
     config.debug.run_eagerly = True
-    # static kernel switch, suitable for static shapes or scenes with less shape changes.
-    config.experimental_config.aclgraph._aclnn_static_shape_kernel = True
+    if ascend_compilation_config.enable_static_kernel:
+        config.experimental_config.aclgraph._aclnn_static_shape_kernel = True
+        # According to the cudagraph_capture_size configuration, set the shapes
+        # that can trigger the compilation of static kernel. If this configuration is
+        # not applied, new shapes will trigger the compilation of static kernels,
+        # affecting program execution.
+        num_spec_tokens = vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
+        uniform_decode_query_len = num_spec_tokens + 1
+        max_num_tokens = vllm_config.scheduler_config.max_num_seqs * uniform_decode_query_len
+        decode_cudagraph_batch_sizes = [
+            x
+            for x in vllm_config.compilation_config.cudagraph_capture_sizes
+            if max_num_tokens >= x >= uniform_decode_query_len
+        ]
+        config.experimental_config.aclgraph._aclnn_static_shape_kernel_sym_value_range = decode_cudagraph_batch_sizes
 
     npugraph_ex = torchair.get_npu_backend(compiler_config=config)
     compile_graph = npugraph_ex(graph, example_inputs)
@@ -121,19 +136,30 @@ class AscendCompiler(CompilerInterface):
     """
     name = "AscendCompiler"
 
+    def compute_hash(self, vllm_config: VllmConfig) -> str:
+        npugraph_ex_enabled = get_ascend_config().ascend_compilation_config.enable_npugraph_ex
+        if npugraph_ex_enabled:
+            self.vllm_config = vllm_config
+        return vllm_config.compute_hash()
+
     def compile(
         self,
         graph: fx.GraphModule,
         example_inputs: list[Any],
         compiler_config: dict[str, Any],
         compile_range: Range,
-        key: Optional[str] = None,
-    ) -> tuple[Optional[Callable], Optional[Any]]:
+        key: str | None = None,
+    ) -> tuple[Callable | None, Any | None]:
+        # inductor can inplace modify the graph, so we need to copy it
+        # see https://github.com/pytorch/pytorch/issues/138980
+        graph = copy.deepcopy(graph)
 
-        ascend_config = get_ascend_config()
-        if ascend_config.enable_npugraph_ex:
-            return npugraph_ex_compile(graph, example_inputs, compiler_config,
-                                       compile_range, key)
+        ascend_compilation_config = get_ascend_config().ascend_compilation_config
+        if ascend_compilation_config.enable_npugraph_ex:
+            assert hasattr(self, "vllm_config")
+            return npugraph_ex_compile(
+                graph, example_inputs, compiler_config, self.vllm_config, ascend_compilation_config, compile_range, key
+            )
         else:
             return fusion_pass_compile(graph, example_inputs, compiler_config,
                                        compile_range, key)

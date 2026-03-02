@@ -126,10 +126,8 @@ class AscendConfig:
         self.SLO_limits_for_dynamic_batch = additional_config.get(
             "SLO_limits_for_dynamic_batch", -1)
         from vllm_ascend.utils import get_flashcomm2_config_and_validate
-        self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_config_and_validate(
-            self, vllm_config)
-        self.enable_npugraph_ex = additional_config.get(
-            "enable_npugraph_ex", False)
+
+        self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_config_and_validate(self, vllm_config)
         # We find that _npu_paged_attention still performs better than
         # npu_fused_infer_attention_score in some cases. We allow to execute
         # _npu_paged_attention in this cases. This should be removed once
@@ -149,21 +147,72 @@ class AscendConfig:
             if vllm_config.kv_transfer_config is None \
                 or not vllm_config.kv_transfer_config.is_kv_consumer:
                 raise NotImplementedError(
-                    "enable_kv_nz is only supported in pd scenario and can "
-                    "only be used in D node.")
+                    "enable_kv_nz is only supported in pd scenario and can only be used in D node."
+                )
 
-    def refresh_eplb_config(self, config):
-        self.expert_map_path = config.get("expert_map_path", None)
-        self.eplb_policy_type = config.get("eplb_policy_type", 1)
-        self.expert_map_record_path = config.get(
-            "expert_map_record_path",
-            None)  # Provide path to export expert map
-        self.init_redundancy_expert = config.get("num_redundant_experts", 0)
-        self.dynamic_eplb = config.get("dynamic_eplb", False)
-        self.num_iterations_eplb_update = config.get(
-            "expert_heat_collection_interval", 4000)
-        self.num_wait_worker_iterations = config.get(
-            "algorithm_execution_interval", 150)
+    def _construct_weight_prefetch_config(self, additional_config):
+        weight_prefetch_config = additional_config.get("weight_prefetch_config", {})
+        self.weight_prefetch_config = WeightPrefetchConfig(weight_prefetch_config)
+        # Deprecated env var handling for backward compatibility
+        if os.getenv("VLLM_ASCEND_ENABLE_PREFETCH_MLP", "0") == "1":
+            MAX_PREFETCH_WEIGHT_SIZE: int = 18 * 1024 * 1024
+            gate_up_prefetch_size = int(os.getenv("VLLM_ASCEND_MLP_GATE_UP_PREFETCH_SIZE", MAX_PREFETCH_WEIGHT_SIZE))
+            down_prefetch_size = int(os.getenv("VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE", MAX_PREFETCH_WEIGHT_SIZE))
+            self.weight_prefetch_config.set_mlp_pre_version_compatibale_config(
+                gate_up_prefetch_size, down_prefetch_size
+            )
+            logger.info_once(
+                f"MLP weight prefetch enabled from env variable VLLM_ASCEND_ENABLE_PREFETCH_MLP."
+                f"gate_up_prefetch_size={gate_up_prefetch_size}, "
+                f"down_prefetch_size={down_prefetch_size}."
+            )
+            warnings.warn(
+                "VLLM_ASCEND_ENABLE_PREFETCH_MLP is deprecated and will be removed in a v0.16.0 version. "
+                "Please use weight_prefetch_config in additional-config for now instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
+    def update_compile_ranges_split_points(self):
+        vllm_config = self.vllm_config
+        if self.ascend_compilation_config.enable_npugraph_ex:
+            if self.ascend_compilation_config.fuse_allreduce_rms:
+                from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import ALLREDUCE_NORM_FUSE_THRESHOLD
+
+                new_compile_ranges_split_points = vllm_config.compilation_config.compile_ranges_split_points
+                new_compile_ranges_split_points.append(ALLREDUCE_NORM_FUSE_THRESHOLD)
+                new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
+                vllm_config.compilation_config.compile_ranges_split_points = new_compile_ranges_split_points
+                logger.debug(
+                    "set compile_ranges_split_points to "
+                    "{new_compile_ranges_split_points} for matmul and allreduce fusion"
+                )
+
+        else:
+            new_compile_ranges_split_points = vllm_config.compilation_config.compile_ranges_split_points
+            if vllm_config.additional_config.get("ascend_compilation_config", {}).get("fuse_allreduce_rms", True):
+                from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import ALLREDUCE_NORM_FUSE_THRESHOLD
+
+                new_compile_ranges_split_points = vllm_config.compilation_config.compile_ranges_split_points
+                new_compile_ranges_split_points.append(ALLREDUCE_NORM_FUSE_THRESHOLD)
+                new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
+                vllm_config.compilation_config.compile_ranges_split_points = new_compile_ranges_split_points
+                logger.debug(
+                    "set compile_ranges_split_points to "
+                    "{new_compile_ranges_split_points} for matmul and allreduce fusion"
+                )
+
+            from vllm_ascend.utils import is_moe_model
+
+            if vllm_config.compilation_config.pass_config.enable_sp and not is_moe_model(vllm_config):
+                from vllm_ascend.compilation.passes.sequence_parallelism import get_sp_threshold
+
+                sp_threshold = get_sp_threshold(vllm_config)
+                new_compile_ranges_split_points.append(sp_threshold)
+                logger.debug(f"add {sp_threshold} to compile_ranges_split_points for sequence parallelism")
+            if len(new_compile_ranges_split_points) > len(vllm_config.compilation_config.compile_ranges_split_points):
+                new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
+                vllm_config.compilation_config.compile_ranges_split_points = new_compile_ranges_split_points
 
 
 class FinegrainedTPConfig:
@@ -230,23 +279,65 @@ class AscendCompilationConfig:
     deployed on Ascend platforms.
     """
 
-    def __init__(self,
-                 fuse_norm_quant: bool = True,
-                 fuse_qknorm_rope: bool = False,
-                 **kwargs):
+    def __init__(
+        self,
+        enable_npugraph_ex: bool = True,
+        enable_static_kernel: bool = False,
+        fuse_norm_quant: bool = True,
+        fuse_qknorm_rope: bool = True,
+        fuse_allreduce_rms: bool = False,
+        **kwargs,
+    ):
         """
         Initialize the configuration.
-        
+
         Args:
+            enable_npugraph_ex (bool): Whether to enable npugraph_ex backend.
+                When set to True, the Fx graph generated by Dymano will be
+                optimized and compiled by the npugraph_ex backend.
+                Default: True
+            enable_static_kernel (bool): Whether to enable static kernel.
+                Static kernel is suitable for scenarios with purely static shapes
+                or minimal shape changes, and can improve network performance.
+                When set to True, when during graph capture, it will compile operator
+                binary files with the corresponding shapes based on the current batch_size,
+                which usually takes some time.
+                Default: False
             fuse_norm_quant (bool): Whether to enable norm and quant fusion optimization.
                 When set to True, the system will optimize norm and quant operations.
                 Default: True
             fuse_qknorm_rope (bool): Whether to enable qknorm and rope fusion optimization.
+                Default: True
+            fuse_allreduce_rms (bool): Whether to enable allreduce and addrmsnorm fusion optimization.
                 Default: False
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
         self.fuse_norm_quant = fuse_norm_quant
-        self.fuse_qknorm_rope = HAS_TRITON or fuse_qknorm_rope
+        self.fuse_qknorm_rope = fuse_qknorm_rope
+        self.fuse_allreduce_rms = fuse_allreduce_rms
+        self.enable_npugraph_ex = enable_npugraph_ex
+        self.enable_static_kernel = enable_static_kernel
+        self.fuse_muls_add = kwargs.get("fuse_muls_add", True)
+        if self.enable_static_kernel:
+            assert self.enable_npugraph_ex, "Static kernel generation requires npugraph_ex to be enabled."
+
+
+class AscendFusionConfig:
+    """
+    Configuration for controlling whether to use a fused operator gmmswigluquant.
+    """
+
+    def __init__(self, fusion_ops_gmmswigluquant: bool = True, **kwargs):
+        """
+        Initialize the configuration.
+
+        Args:
+            fusion_ops_gmmswigluquant (bool): Whether to use a fused operator gmmswigluquant.
+                When set to True, the system will use a fused operator gmmswigluquant.
+                Default: True
+            **kwargs: Additional optional parameters for forward compatibility and configuration extension.
+        """
+        self.fusion_ops_gmmswigluquant = fusion_ops_gmmswigluquant
 
 
 class XliteGraphConfig:

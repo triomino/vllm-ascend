@@ -67,7 +67,8 @@ from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
 if vllm_version_is("0.13.0"):
     from vllm.model_executor.utils import set_random_seed
 else:
-    from vllm.utils.torch_utils import set_random_seed
+    #from vllm.utils.torch_utils import set_random_seed
+    from vllm.model_executor.utils import set_random_seed
 
 torch_non_c_binding_in_graph_functions_npu = dict.fromkeys(
     ["torch.npu.current_stream"],

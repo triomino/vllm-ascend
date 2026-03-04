@@ -15,6 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import copy
 import functools
 from typing import Any, Callable, Optional
 
@@ -26,6 +27,7 @@ from torch._inductor.compile_fx import (graph_returns_tuple,
 from torch._inductor.decomposition import select_decomp_table
 from torch.fx import GraphModule
 from vllm.compilation.compiler_interface import CompilerInterface
+from vllm.config import VllmConfig
 from vllm.config.utils import Range
 
 from vllm_ascend.ascend_config import AscendCompilationConfig, get_ascend_config

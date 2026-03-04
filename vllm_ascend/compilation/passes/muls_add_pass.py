@@ -18,20 +18,20 @@ from __future__ import annotations
 
 import torch
 from torch._inductor.pattern_matcher import PatternMatcherPass
+import torch._inductor.pattern_matcher as pm
 from vllm.config import VllmConfig
 from vllm.config.compilation import Range
 from vllm.logger import logger
 
-from vllm_ascend.compilation.passes.base_pattern import BasePattern
 from vllm_ascend.utils import vllm_version_is
 
 if vllm_version_is("0.15.0"):
     from vllm.compilation.vllm_inductor_pass import VllmInductorPass  # type: ignore
 else:
-    from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
+    from vllm.compilation.vllm_inductor_pass import VllmInductorPass
 
 
-class MulsAddPattern(BasePattern):
+class MulsAddPattern:
     """
     Pattern that matches an element-wise mul + add sequence:
         tmp = x * scale
@@ -40,8 +40,9 @@ class MulsAddPattern(BasePattern):
     """
 
     def __init__(self, vllm_config: VllmConfig, scale: float = 1.0):
-        super().__init__(vllm_config)
+        self.vllm_config = vllm_config
         self.scale = scale
+        self.dtype = vllm_config.model_config.dtype
 
     def get_inputs(self) -> list[torch.Tensor]:
         """
@@ -56,7 +57,7 @@ class MulsAddPattern(BasePattern):
         # pattern instance (self.scale) instead of being passed as an input.
         return [x, y]
 
-    def get_pattern(self):
+    def register(self, pm_pass: PatternMatcherPass):
         def pattern(x: torch.Tensor, y: torch.Tensor):
             """
             Pattern for element-wise x * scale + y.
@@ -65,9 +66,6 @@ class MulsAddPattern(BasePattern):
             out = tmp + y
             return out
 
-        return pattern
-
-    def get_replacement(self):
         def replacement(x: torch.Tensor, y: torch.Tensor):
             """
             Replacement that calls the muls_add_triton kernel using the
@@ -75,7 +73,9 @@ class MulsAddPattern(BasePattern):
             """
             return torch.ops.vllm.muls_add(x, y, self.scale)
 
-        return replacement
+
+        pm.register_replacement(pattern, replacement, self.get_inputs(),
+                                pm.fwd_only, pm_pass)
 
 
 class MulsAddFusionPass(VllmInductorPass):
@@ -98,7 +98,8 @@ class MulsAddFusionPass(VllmInductorPass):
         # Currently we only register a single pattern instance with a fixed
         # scalar scale value. If needed, multiple instances with different
         # scales can be added here in the future.
-        MulsAddPattern(vllm_config, scale=1.0).register(self.pattern_match_passes)
+        routed_scaling_factor = getattr(vllm_config.model_config.hf_text_config, "routed_scaling_factor", 1.0)
+        MulsAddPattern(vllm_config, scale=routed_scaling_factor).register(self.pattern_match_passes)
 
     def __call__(self, graph: torch.fx.Graph) -> None:  # type: ignore[override]
         self.begin()

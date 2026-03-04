@@ -338,13 +338,6 @@ def _muls_add_impl_fake(
     return torch.empty_like(x)
 
 
-direct_register_custom_op(
-    op_name="maybe_chunk_residual",
-    op_func=_maybe_chunk_residual_impl,
-    fake_impl=lambda x, residual: torch.empty_like(x),
-    mutates_args=[],
-    dispatch_key="PrivateUse1",
-)
 
 direct_register_custom_op(op_name="maybe_all_gather_and_maybe_unpad",
                           op_func=_maybe_all_gather_and_maybe_unpad_impl,

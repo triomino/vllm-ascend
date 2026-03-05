@@ -34,6 +34,7 @@ from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD,
                                AscendDeviceType, enable_sp,
                                get_ascend_device_type, update_aclgraph_sizes,
                                update_cudagraph_capture_sizes,
+                               refresh_block_size,
                                check_kv_extra_config)
 
 if TYPE_CHECKING:

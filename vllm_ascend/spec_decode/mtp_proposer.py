@@ -426,7 +426,6 @@ class MtpProposer(EagleProposer):
                             self.device) - ori_last_token_indices - 1
                     num_accept_tokens = \
                         query_lens_d.to(self.device) - num_reject_tokens
-                    ori_seq_len = attn_metadata_i.seq_lens
                     mtp_slot_mapping = self.runner.pcp_manager.mtp_slot_pad
 
                     # slot_mapping index base offset:
@@ -514,7 +513,7 @@ class MtpProposer(EagleProposer):
             if self.pcp_size * self.dcp_size > 1:
                 # update local seq_len
                 num_computed_tokens_of_pcp_dcp = self.runner.pcp_manager._get_cp_local_seq_lens(
-                    ori_seq_len + step + 1,
+                    attn_metadata_i.seq_lens[:batch_size],
                     self.pcp_size,
                     self.dcp_size,
                     self.runner.parallel_config.cp_kv_cache_interleave_size,

@@ -24,7 +24,6 @@
 #include "torch_npu/csrc/aten/common/from_blob.h"
 
 namespace vllm_ascend {
-
   extern void get_masked_input_and_mask_impl(
     void* stream,
     void* input,

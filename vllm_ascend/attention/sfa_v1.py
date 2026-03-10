@@ -861,11 +861,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                         kv_cache[1].view(-1, k_pe.shape[-1]), slot_mapping,
                         k_pe)
 
-            if kv_cache is not None:
-                torch_npu.npu_scatter_nd_update_(
-                    kv_cache[2].view(-1, k.shape[-1]),
-                    attn_metadata.slot_mapping.view(-1, 1),
-                    k.view(-1, k.shape[-1]))  # b, s, n, d
 
         topk_indices = self.indexer_select_post_process(
             x=hidden_states,
